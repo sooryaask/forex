@@ -1,0 +1,42 @@
+//@version=5
+strategy("AI CFD Event Strategy (5m)", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// AI signals from external webhook/alerts or manual override
+movement = input.float(0.0, "Movement Score (-100..100)", step=0.1)
+liquidity = input.float(50.0, "Liquidity Score (0..100)", minval=0, maxval=100, step=0.1)
+price_diff = input.float(1.0, "Predicted Price Move (points)", step=0.1)
+
+// Economic event context inputs (for manual signal shaping)
+event_strength = input.int(0, "Event Strength (-5..5)", minval=-5, maxval=5)
+event_type = input.string("Neutral", "Event Type", options=["Neutral", "FX", "Inflation", "GDP", "Rate"], inline="event")
+
+// Decision rules
+movement_threshold = 10
+liquidity_threshold = 50
+bias = event_strength * 2
+
+long_condition = movement > movement_threshold and liquidity > liquidity_threshold and (movement + bias) > 10
+short_condition = movement < -movement_threshold and liquidity > liquidity_threshold and (movement + bias) < -10
+
+// Apply 1 point predicted movement difference to target and stop
+asp_target = price_diff
+asp_stop = price_diff * 0.6
+
+if (long_condition)
+    strategy.entry("AI Long", strategy.long)
+    strategy.exit("AI Long Exit", from_entry="AI Long", profit=asp_target, loss=asp_stop)
+
+if (short_condition)
+    strategy.entry("AI Short", strategy.short)
+    strategy.exit("AI Short Exit", from_entry="AI Short", profit=asp_target, loss=asp_stop)
+
+// Plot signals and labels
+defcolor = movement > movement_threshold ? color.green : movement < -movement_threshold ? color.red : color.gray
+plotchar(long_condition, title="Long Signal", char='▲', color=color.green, location=location.belowbar, size=size.tiny)
+plotchar(short_condition, title="Short Signal", char='▼', color=color.red, location=location.abovebar, size=size.tiny)
+
+plot(movement, title="Movement Score", color=defcolor, linewidth=2)
+plot(liquidity, title="Liquidity", color=color.blue, linewidth=2)
+
+if barstate.islast
+    label.new(bar_index, high, "Signal: " + (long_condition ? "BUY" : short_condition ? "SELL" : "NEUTRAL") + "\nMovement: " + str.tostring(movement, format.percent) + "\nLiquidity: " + str.tostring(liquidity, format.percent) + "\nPredicted move: " + str.tostring(price_diff), xloc.bar_index, yloc.price, color=color.new(color.black, 80), textcolor=color.white, style=label.style_label_left)

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QGraphicsDropShadowEffect,
     QSizePolicy, QPushButton, QProgressBar
 )
-from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, Property, QTimer
 from PySide6.QtGui import QFont, QPainter, QColor, QPen, QLinearGradient, QBrush, QPainterPath
 import math
 
@@ -353,8 +353,17 @@ class GlowButton(QPushButton):
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
+        self._default_text = text
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(42)
+        self._apply_style()
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(59, 130, 246, 60))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
+
+    def _apply_style(self):
         self.setStyleSheet(f"""
             GlowButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -374,24 +383,49 @@ class GlowButton(QPushButton):
             GlowButton:pressed {{
                 background: {Colors.ACCENT_HOVER};
             }}
+            GlowButton:disabled {{
+                background: {Colors.BG_ELEVATED};
+                color: {Colors.TEXT_MUTED};
+            }}
         """)
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(59, 130, 246, 60))
-        shadow.setOffset(0, 4)
-        self.setGraphicsEffect(shadow)
+
+    def set_loading(self, loading: bool, text: str = ""):
+        if loading:
+            self.setEnabled(False)
+            self.setText(text or "  Loading...  ")
+        else:
+            self.setEnabled(True)
+            self.setText(self._default_text)
 
 
 # ── Loading Spinner Label ────────────────────────────────────────────────────
 
 class LoadingLabel(QLabel):
-    """Animated loading text."""
+    """Animated loading text with dots animation."""
 
     def __init__(self, text: str = "Loading", parent=None):
-        super().__init__(text + "...", parent)
+        super().__init__(parent)
+        self._base_text = text
+        self._dot_count = 0
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(f"""
             font-size: {Fonts.SIZE_BASE}px;
             color: {Colors.TEXT_MUTED};
             padding: 40px;
         """)
+        self.setText(text + "...")
+
+        # Animate dots
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._animate)
+        self._anim_timer.start(400)
+
+    def _animate(self):
+        if self.isVisible():
+            self._dot_count = (self._dot_count + 1) % 4
+            dots = "." * self._dot_count
+            self.setText(self._base_text + dots)
+
+    def setText(self, text: str):
+        self._base_text = text.rstrip(".")
+        super().setText(text)

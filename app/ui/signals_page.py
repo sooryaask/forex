@@ -20,13 +20,14 @@ from ui.widgets import (
 class ScanThread(QThread):
     """Scan multiple assets for signals."""
     result_ready = Signal(list)
+    progress = Signal(str)
 
     def __init__(self, asset_class: str):
         super().__init__()
         self.asset_class = asset_class
 
     def run(self):
-        from core.data_fetcher import ASSET_CATALOG, fetch_ohlcv, add_indicators
+        from core.data_fetcher import ASSET_CATALOG, fetch_ohlcv, add_indicators, get_current_price
         from core.predictor_engine import compute_signal
 
         symbols = ASSET_CATALOG.get(self.asset_class, {})
@@ -34,6 +35,7 @@ class ScanThread(QThread):
 
         for name, ticker in symbols.items():
             try:
+                self.progress.emit(f"Analysing {name}...")
                 df = fetch_ohlcv(ticker, "1M")
                 if df.empty:
                     continue
@@ -43,7 +45,16 @@ class ScanThread(QThread):
                 signal = compute_signal(df_ind)
                 signal["name"] = name
                 signal["symbol"] = ticker
-                signal["price"] = df["close"].iloc[-1]
+
+                # Get real current price
+                price_info = get_current_price(ticker)
+                if price_info:
+                    signal["price"] = price_info["price"]
+                    signal["change_pct"] = price_info.get("change_pct", 0)
+                else:
+                    signal["price"] = df["close"].iloc[-1]
+                    signal["change_pct"] = 0
+
                 signal["time"] = datetime.now().strftime("%H:%M")
                 results.append(signal)
             except Exception:
@@ -73,8 +84,12 @@ class SignalCard(Card):
 
         price = data.get("price", 0)
         price_fmt = f"{price:,.5f}" if price < 100 else f"{price:,.2f}"
-        price_lbl = QLabel(price_fmt)
-        price_lbl.setStyleSheet(f"font-size: {Fonts.SIZE_SM}px; font-family: {Fonts.MONO}; color: {Colors.TEXT_SECONDARY};")
+        change_pct = data.get("change_pct", 0)
+        change_color = Colors.BUY if change_pct >= 0 else Colors.SELL
+        change_arrow = "▲" if change_pct >= 0 else "▼"
+
+        price_lbl = QLabel(f"{price_fmt}  {change_arrow}{abs(change_pct):.2f}%")
+        price_lbl.setStyleSheet(f"font-size: {Fonts.SIZE_SM}px; font-family: {Fonts.MONO}; color: {change_color};")
 
         name_col.addWidget(name)
         name_col.addWidget(price_lbl)
@@ -89,27 +104,25 @@ class SignalCard(Card):
 
         # Confidence bar
         conf = data.get("confidence", 0)
-        conf_bar = QFrame()
-        conf_bar.setFixedHeight(4)
-        conf_bar.setStyleSheet(f"""
-            background: {Colors.BG_INPUT};
-            border-radius: 2px;
-        """)
-        layout.addWidget(conf_bar)
+        bar_container = QFrame()
+        bar_container.setFixedHeight(6)
+        bar_container.setStyleSheet(f"background: {Colors.BG_INPUT}; border-radius: 3px;")
 
-        # Filled portion
-        signal = data.get("signal", "NEUTRAL")
-        if signal == "BUY":
+        signal_type = data.get("signal", "NEUTRAL")
+        if signal_type == "BUY":
             bar_color = Colors.BUY
-        elif signal == "SELL":
+        elif signal_type == "SELL":
             bar_color = Colors.SELL
         else:
             bar_color = Colors.NEUTRAL
 
-        conf_fill = QFrame(conf_bar)
-        conf_fill.setFixedHeight(4)
-        conf_fill.setFixedWidth(max(int(conf_bar.width() * conf), int(250 * conf)))
-        conf_fill.setStyleSheet(f"background: {bar_color}; border-radius: 2px;")
+        bar_fill = QFrame(bar_container)
+        bar_fill.setFixedHeight(6)
+        fill_width = max(int(260 * conf), 4)
+        bar_fill.setFixedWidth(fill_width)
+        bar_fill.setStyleSheet(f"background: {bar_color}; border-radius: 3px;")
+
+        layout.addWidget(bar_container)
 
         # Stats row
         stats = QHBoxLayout()
@@ -204,22 +217,34 @@ class SignalsPage(QWidget):
 
         self._layout.addLayout(controls)
 
+        # Status label for progress
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet(f"font-size: {Fonts.SIZE_SM}px; color: {Colors.TEXT_MUTED};")
+        self._status_label.setAlignment(Qt.AlignCenter)
+        self._status_label.setVisible(False)
+        self._layout.addWidget(self._status_label)
+
         # Results grid
         self._grid_widget = QWidget()
         self._grid = QGridLayout(self._grid_widget)
         self._grid.setSpacing(16)
         self._layout.addWidget(self._grid_widget)
 
-        self._loading = LoadingLabel("Click 'Scan for Signals' to begin")
-        self._layout.addWidget(self._loading)
+        self._empty_label = QLabel("Click 'Scan for Signals' to analyse all assets in the selected class")
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setStyleSheet(f"font-size: {Fonts.SIZE_BASE}px; color: {Colors.TEXT_MUTED}; padding: 60px;")
+        self._layout.addWidget(self._empty_label)
 
         self._layout.addStretch()
 
     def _run_scan(self):
-        self._scan_btn.setEnabled(False)
-        self._scan_btn.setText("  Scanning...  ")
-        self._loading.setText(f"Scanning {self._class_combo.currentText()} markets...")
-        self._loading.setVisible(True)
+        if self._thread is not None and self._thread.isRunning():
+            return
+
+        self._scan_btn.set_loading(True, "  Scanning...  ")
+        self._status_label.setText(f"Scanning {self._class_combo.currentText()} markets...")
+        self._status_label.setVisible(True)
+        self._empty_label.setVisible(False)
 
         # Clear grid
         while self._grid.count():
@@ -228,17 +253,20 @@ class SignalsPage(QWidget):
                 child.widget().deleteLater()
 
         self._thread = ScanThread(self._class_combo.currentText())
+        self._thread.progress.connect(self._on_progress)
         self._thread.result_ready.connect(self._on_results)
         self._thread.start()
 
+    def _on_progress(self, text: str):
+        self._status_label.setText(text)
+
     def _on_results(self, results: list):
-        self._scan_btn.setEnabled(True)
-        self._scan_btn.setText("  Scan for Signals  ")
-        self._loading.setVisible(False)
+        self._scan_btn.set_loading(False)
+        self._status_label.setVisible(False)
 
         if not results:
-            self._loading.setText("No signals found. Try a different asset class.")
-            self._loading.setVisible(True)
+            self._empty_label.setText("No signals found. Try a different asset class.")
+            self._empty_label.setVisible(True)
             return
 
         # Update summary
@@ -252,3 +280,12 @@ class SignalsPage(QWidget):
         for i, data in enumerate(results):
             card = SignalCard(data)
             self._grid.addWidget(card, i // 2, i % 2)
+
+        # Save signals to history
+        try:
+            from ui.history_page import add_signal_to_history
+            for data in results:
+                if data.get("signal") in ("BUY", "SELL"):
+                    add_signal_to_history(data)
+        except Exception:
+            pass

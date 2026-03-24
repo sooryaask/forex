@@ -50,8 +50,8 @@ class Colors:
 
 
 class Fonts:
-    FAMILY = "SF Pro Display, Helvetica Neue, -apple-system, Segoe UI, Arial"
-    MONO = "SF Mono, Menlo, JetBrains Mono, Consolas, monospace"
+    FAMILY = "Helvetica Neue, Helvetica, Arial, sans-serif"
+    MONO = "Menlo, Monaco, Courier New, monospace"
     SIZE_XS = 10
     SIZE_SM = 11
     SIZE_BASE = 13

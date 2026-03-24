@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QFrame,
     QScrollArea, QSizePolicy, QGridLayout, QPushButton, QSplitter
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -34,25 +34,32 @@ class DataThread(QThread):
         self.timeframe = timeframe
 
     def run(self):
-        from core.data_fetcher import fetch_ohlcv, add_indicators, get_current_price
-        from core.predictor_engine import compute_signal
+        try:
+            from core.data_fetcher import fetch_ohlcv, add_indicators, get_current_price
+            from core.predictor_engine import compute_signal
 
-        df = fetch_ohlcv(self.symbol, self.timeframe)
-        price_info = get_current_price(self.symbol)
+            df = fetch_ohlcv(self.symbol, self.timeframe)
+            price_info = get_current_price(self.symbol)
 
-        if df.empty:
-            self.result_ready.emit({"error": "No data available"})
-            return
+            if df.empty:
+                self.result_ready.emit({"error": f"No data available for {self.symbol}. Check your internet connection."})
+                return
 
-        df_ind = add_indicators(df.copy())
-        signal = compute_signal(df_ind) if not df_ind.empty else {"signal": "NEUTRAL", "confidence": 0, "analysis": []}
+            df_ind = add_indicators(df.copy())
+            signal = compute_signal(df_ind) if not df_ind.empty else {
+                "signal": "NEUTRAL", "confidence": 0, "movement_score": 0,
+                "entry": 0, "stop_loss": 0, "take_profit": 0, "risk_reward": 0,
+                "analysis": ["Not enough data for full technical analysis"]
+            }
 
-        self.result_ready.emit({
-            "df": df,
-            "df_ind": df_ind,
-            "signal": signal,
-            "price_info": price_info,
-        })
+            self.result_ready.emit({
+                "df": df,
+                "df_ind": df_ind,
+                "signal": signal,
+                "price_info": price_info,
+            })
+        except Exception as e:
+            self.result_ready.emit({"error": f"Analysis failed: {str(e)}"})
 
 
 class ChartCanvas(FigureCanvasQTAgg):
@@ -77,11 +84,24 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         # Prepare data for mplfinance
         plot_df = df.copy()
-        plot_df.columns = [c.capitalize() if c in ("open", "high", "low", "close", "volume") else c for c in plot_df.columns]
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col not in plot_df.columns:
-                if col.lower() in plot_df.columns:
-                    plot_df[col] = plot_df[col.lower()]
+        # Ensure correct column names for mplfinance
+        col_map = {}
+        for col in plot_df.columns:
+            if col.lower() == "open":
+                col_map[col] = "Open"
+            elif col.lower() == "high":
+                col_map[col] = "High"
+            elif col.lower() == "low":
+                col_map[col] = "Low"
+            elif col.lower() == "close":
+                col_map[col] = "Close"
+            elif col.lower() == "volume":
+                col_map[col] = "Volume"
+        plot_df = plot_df.rename(columns=col_map)
+
+        # Make sure index is DatetimeIndex
+        if not isinstance(plot_df.index, pd.DatetimeIndex):
+            plot_df.index = pd.to_datetime(plot_df.index)
 
         # Custom style
         mc = mpf.make_marketcolors(
@@ -106,17 +126,7 @@ class ChartCanvas(FigureCanvasQTAgg):
             },
         )
 
-        # Additional plots (EMA overlays if available)
-        add_plots = []
-        if "ema_9" in df.columns:
-            add_plots.append(mpf.make_addplot(df["ema_9"], color=Colors.ACCENT, width=1, ax=None))
-        if "ema_21" in df.columns:
-            add_plots.append(mpf.make_addplot(df["ema_21"], color=Colors.PURPLE, width=1, ax=None))
-
-        has_volume = "Volume" in plot_df.columns or "volume" in plot_df.columns
-        if has_volume:
-            vol_data = plot_df.get("Volume", plot_df.get("volume", pd.Series()))
-            has_volume = vol_data.sum() > 0
+        has_volume = "Volume" in plot_df.columns and plot_df["Volume"].sum() > 0
 
         try:
             mpf.plot(
@@ -132,9 +142,10 @@ class ChartCanvas(FigureCanvasQTAgg):
             ax = self.fig.add_subplot(111)
             ax.set_facecolor(Colors.BG_CARD)
             close_data = plot_df.get("Close", plot_df.get("close", pd.Series()))
-            ax.plot(close_data.values, color=Colors.ACCENT, linewidth=1.5)
-            ax.fill_between(range(len(close_data)), close_data.values,
-                          alpha=0.1, color=Colors.ACCENT)
+            if not close_data.empty:
+                ax.plot(close_data.values, color=Colors.ACCENT, linewidth=1.5)
+                ax.fill_between(range(len(close_data)), close_data.values,
+                              alpha=0.1, color=Colors.ACCENT)
             ax.tick_params(colors=Colors.TEXT_MUTED)
             for spine in ax.spines.values():
                 spine.set_color(Colors.BORDER)
@@ -151,7 +162,8 @@ class AnalysisPage(QWidget):
         self._current_tf = "1M"
         self._thread = None
         self._build_ui()
-        self._run_analysis()
+        # Defer initial analysis until UI is fully ready
+        QTimer.singleShot(500, self._run_analysis)
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -185,7 +197,7 @@ class AnalysisPage(QWidget):
         # Symbol selector
         self._symbol_combo = QComboBox()
         self._populate_symbols("Forex")
-        self._symbol_combo.currentTextChanged.connect(self._on_symbol_changed)
+        self._symbol_combo.currentIndexChanged.connect(self._on_symbol_changed)
         controls.addWidget(self._symbol_combo)
 
         controls.addSpacing(12)
@@ -287,7 +299,9 @@ class AnalysisPage(QWidget):
         self._analysis_container = QVBoxLayout()
         self._analysis_container.setSpacing(6)
 
-        self._loading_label = LoadingLabel("Running analysis")
+        self._loading_label = QLabel("Running analysis...")
+        self._loading_label.setAlignment(Qt.AlignCenter)
+        self._loading_label.setStyleSheet(f"font-size: {Fonts.SIZE_BASE}px; color: {Colors.TEXT_MUTED}; padding: 40px;")
         self._analysis_container.addWidget(self._loading_label)
 
         layout.addLayout(self._analysis_container)
@@ -304,16 +318,23 @@ class AnalysisPage(QWidget):
 
     def _on_class_changed(self, asset_class: str):
         self._populate_symbols(asset_class)
+        # Auto-analyse first symbol in new class
+        if self._symbol_combo.count() > 0:
+            self._current_symbol = self._symbol_combo.currentData()
+            self._run_analysis()
 
-    def _on_symbol_changed(self, name: str):
+    def _on_symbol_changed(self, index: int):
         symbol = self._symbol_combo.currentData()
-        if symbol:
+        if symbol and symbol != self._current_symbol:
             self._current_symbol = symbol
+            self._run_analysis()
 
     def _on_tf_click(self, tf: str):
         self._current_tf = tf
         for btn in self._tf_buttons:
             btn.setStyleSheet(self._tf_style(btn.text() == tf))
+        # Auto-analyse on timeframe change
+        self._run_analysis()
 
     def _tf_style(self, active: bool) -> str:
         if active:
@@ -335,16 +356,25 @@ class AnalysisPage(QWidget):
         """
 
     def _run_analysis(self):
+        # Prevent multiple simultaneous analyses
+        if self._thread is not None and self._thread.isRunning():
+            return
+
         symbol = self._symbol_combo.currentData() or self._current_symbol
         self._current_symbol = symbol
+
+        # Show loading state
+        self._analyse_btn.set_loading(True, "  Analysing...  ")
+        self._loading_label.setText(f"Fetching live data for {self._symbol_combo.currentText() or symbol}...")
         self._loading_label.setVisible(True)
-        self._loading_label.setText(f"Analysing {self._symbol_combo.currentText()}...")
 
         self._thread = DataThread(symbol, self._current_tf)
         self._thread.result_ready.connect(self._on_result)
         self._thread.start()
 
     def _on_result(self, result: dict):
+        # Re-enable button
+        self._analyse_btn.set_loading(False)
         self._loading_label.setVisible(False)
 
         if "error" in result:
@@ -375,7 +405,7 @@ class AnalysisPage(QWidget):
             for pill in [self._entry_pill, self._sl_pill, self._tp_pill, self._rr_pill]:
                 pill.set_value("—")
 
-        # Update price
+        # Update price from live data
         if price_info:
             price = price_info["price"]
             self._price_label.setText(fmt(price))
@@ -388,13 +418,18 @@ class AnalysisPage(QWidget):
             self._price_label.setText("—")
             self._change_label.setText("")
 
-        # Update analysis points
-        # Clear old points
+        # Clear old analysis points (keep the loading label)
         while self._analysis_container.count():
             child = self._analysis_container.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            w = child.widget()
+            if w and w is not self._loading_label:
+                w.deleteLater()
 
+        # Re-add loading label (hidden)
+        self._analysis_container.addWidget(self._loading_label)
+        self._loading_label.setVisible(False)
+
+        # Add new analysis points
         for point_text in signal.get("analysis", []):
             bullish = None
             lower = point_text.lower()
@@ -403,3 +438,12 @@ class AnalysisPage(QWidget):
             elif any(w in lower for w in ["bearish", "sell", "overbought", "pullback", "downtrend", "below", "red"]):
                 bullish = False
             self._analysis_container.addWidget(AnalysisPoint(point_text, bullish))
+
+        # Save to history
+        try:
+            from ui.history_page import add_signal_to_history
+            signal["name"] = self._symbol_combo.currentText() or "Unknown"
+            signal["symbol"] = self._current_symbol
+            add_signal_to_history(signal)
+        except Exception:
+            pass

@@ -13,7 +13,7 @@ from PySide6.QtGui import QPixmap, QImage, QDragEnterEvent, QDropEvent, QPainter
 from ui.theme import Colors, Fonts, Radius, Spacing
 from ui.widgets import (
     Card, SectionHeader, ConfidenceGauge, SignalBadge, StatPill,
-    AnalysisPoint, GlowButton, Divider, LoadingLabel
+    AnalysisPoint, GlowButton, Divider
 )
 
 
@@ -26,20 +26,23 @@ class AnalysisThread(QThread):
         self.price_text = price_text
 
     def run(self):
-        from core.predictor_engine import analyse_screenshot_data
-        import re
-        # Extract numbers from pasted text
-        numbers = re.findall(r"[\d]+\.[\d]+", self.price_text)
-        if not numbers:
-            numbers = re.findall(r"[\d]+", self.price_text)
+        try:
+            from core.predictor_engine import analyse_screenshot_data
+            import re
+            # Extract numbers from pasted text
+            numbers = re.findall(r"[\d]+\.[\d]+", self.price_text)
+            if not numbers:
+                numbers = re.findall(r"[\d]+", self.price_text)
 
-        if len(numbers) < 3:
-            self.result_ready.emit({"error": "Could not extract enough price data. Please paste at least 3 price values."})
-            return
+            if len(numbers) < 3:
+                self.result_ready.emit({"error": "Could not extract enough price data. Please paste at least 3 price values, e.g.:\n1.0845\n1.0852\n1.0838"})
+                return
 
-        prices = [float(n) for n in numbers[:50]]  # cap at 50 points
-        result = analyse_screenshot_data(prices)
-        self.result_ready.emit(result)
+            prices = [float(n) for n in numbers[:50]]  # cap at 50 points
+            result = analyse_screenshot_data(prices)
+            self.result_ready.emit(result)
+        except Exception as e:
+            self.result_ready.emit({"error": f"Analysis failed: {str(e)}"})
 
 
 class DropZone(QFrame):
@@ -136,6 +139,7 @@ class DropZone(QFrame):
 class ScannerPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._thread = None
         self._build_ui()
 
     def _build_ui(self):
@@ -299,7 +303,6 @@ class ScannerPage(QWidget):
         pixmap = QPixmap(path)
         if not pixmap.isNull():
             self._drop_zone.set_image(pixmap)
-            # For now, show a message about image analysis
             self._show_image_analysis_placeholder()
 
     def _show_image_analysis_placeholder(self):
@@ -308,10 +311,7 @@ class ScannerPage(QWidget):
         self._result_gauge.set_value(0.0, "NEUTRAL")
 
         # Clear old analysis
-        while self._analysis_list.count():
-            child = self._analysis_list.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        self._clear_analysis_list()
 
         self._analysis_list.addWidget(AnalysisPoint(
             "Image uploaded successfully. For full image analysis, paste the visible price levels in the price data panel.",
@@ -322,30 +322,34 @@ class ScannerPage(QWidget):
             None
         ))
 
+    def _clear_analysis_list(self):
+        while self._analysis_list.count():
+            child = self._analysis_list.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
     def _run_price_analysis(self):
         text = self._price_input.toPlainText().strip()
         if not text:
             return
 
-        self._analyse_btn.setEnabled(False)
-        self._analyse_btn.setText("  Analysing...  ")
+        if self._thread is not None and self._thread.isRunning():
+            return
+
+        self._analyse_btn.set_loading(True, "  Analysing...  ")
 
         self._thread = AnalysisThread(text)
         self._thread.result_ready.connect(self._on_analysis_result)
         self._thread.start()
 
     def _on_analysis_result(self, result: dict):
-        self._analyse_btn.setEnabled(True)
-        self._analyse_btn.setText("  Analyse Price Data  ")
+        self._analyse_btn.set_loading(False)
         self._results_frame.setVisible(True)
 
         if "error" in result:
             self._result_badge.set_signal("NEUTRAL")
             self._result_gauge.set_value(0.0)
-            while self._analysis_list.count():
-                child = self._analysis_list.takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
+            self._clear_analysis_list()
             self._analysis_list.addWidget(AnalysisPoint(result["error"], None))
             return
 
@@ -360,10 +364,7 @@ class ScannerPage(QWidget):
             self._r_rr.set_value(f"{result['risk_reward']}:1")
 
         # Clear and populate analysis
-        while self._analysis_list.count():
-            child = self._analysis_list.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        self._clear_analysis_list()
 
         for text in result.get("analysis", []):
             bullish = None

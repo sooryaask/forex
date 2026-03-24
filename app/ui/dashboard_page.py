@@ -7,21 +7,23 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QFrame,
     QGridLayout, QSizePolicy
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
 from ui.theme import Colors, Fonts, Radius, Spacing
 from ui.widgets import (
     Card, MetricCard, SectionHeader, MarketTickerRow,
-    Divider, SignalBadge, LoadingLabel
+    Divider, SignalBadge, GlowButton
 )
 
 
 class MarketFetchThread(QThread):
     """Background thread to fetch market data."""
     data_ready = Signal(list)
+    progress = Signal(str)
 
     def run(self):
         from core.data_fetcher import get_market_overview
+        self.progress.emit("Connecting to market data feeds...")
         data = get_market_overview()
         self.data_ready.emit(data)
 
@@ -29,8 +31,10 @@ class MarketFetchThread(QThread):
 class DashboardPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._thread = None
         self._build_ui()
-        self._load_data()
+        # Defer data load until UI is ready
+        QTimer.singleShot(300, self._load_data)
 
     def _build_ui(self):
         scroll = QScrollArea(self)
@@ -92,14 +96,22 @@ class DashboardPage(QWidget):
         self._layout.addLayout(stats_grid)
 
         # ── Market Overview Section ──────────────────────────────────────
-        self._layout.addWidget(SectionHeader("Market Overview", "Live prices across global markets"))
+        market_header_row = QHBoxLayout()
+        market_header_row.addWidget(SectionHeader("Market Overview", "Live prices across global markets"))
+        market_header_row.addStretch()
+        self._refresh_btn = GlowButton("  Refresh  ")
+        self._refresh_btn.clicked.connect(self._load_data)
+        market_header_row.addWidget(self._refresh_btn)
+        self._layout.addLayout(market_header_row)
 
         self._market_card = Card()
         self._market_layout = QVBoxLayout(self._market_card)
         self._market_layout.setContentsMargins(0, 8, 0, 8)
         self._market_layout.setSpacing(0)
 
-        self._loading = LoadingLabel("Fetching live market data")
+        self._loading = QLabel("Fetching live market data...")
+        self._loading.setAlignment(Qt.AlignCenter)
+        self._loading.setStyleSheet(f"font-size: {Fonts.SIZE_BASE}px; color: {Colors.TEXT_MUTED}; padding: 40px;")
         self._market_layout.addWidget(self._loading)
 
         self._layout.addWidget(self._market_card)
@@ -138,18 +150,36 @@ class DashboardPage(QWidget):
         self._layout.addStretch()
 
     def _load_data(self):
+        if self._thread is not None and self._thread.isRunning():
+            return
+
+        self._refresh_btn.set_loading(True, "  Loading...  ")
+        self._loading.setText("Fetching live market data...")
+        self._loading.setVisible(True)
+
         self._thread = MarketFetchThread()
+        self._thread.progress.connect(lambda t: self._loading.setText(t))
         self._thread.data_ready.connect(self._on_data_ready)
         self._thread.start()
 
     def _on_data_ready(self, data: list):
-        # Remove loading label
+        self._refresh_btn.set_loading(False)
+        self._loading.setVisible(False)
+
+        # Clear previous market rows (keep loading label)
+        while self._market_layout.count():
+            child = self._market_layout.takeAt(0)
+            w = child.widget()
+            if w and w is not self._loading:
+                w.deleteLater()
+
+        # Re-add hidden loading label
+        self._market_layout.addWidget(self._loading)
         self._loading.setVisible(False)
 
         if not data:
-            lbl = QLabel("  Unable to fetch market data. Check your internet connection.")
-            lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 20px; font-size: {Fonts.SIZE_SM}px;")
-            self._market_layout.addWidget(lbl)
+            self._loading.setText("Unable to fetch market data. Check your internet connection and click Refresh.")
+            self._loading.setVisible(True)
             return
 
         # Add header row

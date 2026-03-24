@@ -1,0 +1,20 @@
+# Data files
+backend/data/historical_data.parquet
+app/data/
+
+# Models
+backend/models/*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+tradingview/gg

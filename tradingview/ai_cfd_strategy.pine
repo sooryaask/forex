@@ -4,6 +4,7 @@ strategy("AI CFD Event Strategy (5m)", overlay=true, margin_long=100, margin_sho
 // AI signals from external webhook/alerts or manual override
 movement = input.float(0.0, "Movement Score (-100..100)", step=0.1)
 liquidity = input.float(50.0, "Liquidity Score (0..100)", minval=0, maxval=100, step=0.1)
+confidence = input.float(0.5, "Confidence Score (0..1)", minval=0, maxval=1, step=0.01)
 price_diff = input.float(1.0, "Predicted Price Move (points)", step=0.1)
 
 // Economic event context inputs (for manual signal shaping)
@@ -15,8 +16,8 @@ movement_threshold = 10
 liquidity_threshold = 50
 bias = event_strength * 2
 
-long_condition = movement > movement_threshold and liquidity > liquidity_threshold and (movement + bias) > 10
-short_condition = movement < -movement_threshold and liquidity > liquidity_threshold and (movement + bias) < -10
+long_condition = movement > movement_threshold and liquidity > liquidity_threshold and (movement + bias) > 10 and confidence > 0.6
+short_condition = movement < -movement_threshold and liquidity > liquidity_threshold and (movement + bias) < -10 and confidence > 0.6
 
 // Apply 1 point predicted movement difference to target and stop
 asp_target = price_diff
@@ -39,4 +40,4 @@ plot(movement, title="Movement Score", color=defcolor, linewidth=2)
 plot(liquidity, title="Liquidity", color=color.blue, linewidth=2)
 
 if barstate.islast
-    label.new(bar_index, high, "Signal: " + (long_condition ? "BUY" : short_condition ? "SELL" : "NEUTRAL") + "\nMovement: " + str.tostring(movement, format.percent) + "\nLiquidity: " + str.tostring(liquidity, format.percent) + "\nPredicted move: " + str.tostring(price_diff), xloc.bar_index, yloc.price, color=color.new(color.black, 80), textcolor=color.white, style=label.style_label_left)
+    label.new(bar_index, high, "Signal: " + (long_condition ? "BUY" : short_condition ? "SELL" : "NEUTRAL") + "\nMovement: " + str.tostring(movement, format.percent) + "\nLiquidity: " + str.tostring(liquidity, format.percent) + "\nConfidence: " + str.tostring(confidence, format.percent) + "\nPredicted move: " + str.tostring(price_diff), xloc.bar_index, yloc.price, color=color.new(color.black, 80), textcolor=color.white, style=label.style_label_left)

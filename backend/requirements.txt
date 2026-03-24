@@ -1,4 +1,12 @@
 flask
 pandas
+numpy
 scikit-learn
 requests
+yfinance
+alpha_vantage
+fredapi
+ta
+pyarrow
+xgboost
+joblib
